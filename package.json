@@ -1,0 +1,27 @@
+{
+  "name": "pi-memsearch",
+  "version": "0.0.1",
+  "description": "A pi extension integrating the memsearch agent memory plugin (semantic, persistent memory backed by Markdown + Milvus).",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "memsearch",
+    "memory",
+    "milvus",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
