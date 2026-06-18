@@ -1,91 +1,87 @@
 /**
- * pi-memsearch — pi extension integrating the memsearch agent memory plugin.
+ * pi-memsearch — persistent semantic memory for pi via the memsearch CLI.
  *
- * memsearch (https://github.com/zilliztech/memsearch) is a persistent, semantic
- * memory layer for AI agents, backed by Markdown files and a Milvus shadow index.
- * This extension lets pi:
- *   - recall past sessions via semantic search (`memsearch search`)
- *   - (planned) capture conversation turns into the memsearch journal
+ * - Recall:  memory_recall / memory_expand / memory_transcript tools + /memory-recall command
+ * - Capture: summarize each exchange on agent_end, append to the daily journal, index
+ * - Cold start: inject prompt-relevant memories on the first prompt of a session
  *
- * Requires the `memsearch` CLI on PATH:
- *   uv tool install "memsearch[onnx]"
+ * Trust (I2): the auto-firing cold-start spawns the memsearch CLI with no user
+ * action, so it is gated on ctx.isProjectTrusted() like every other read path.
  *
- * This is an early scaffold — the recall tool shells out to the CLI; capture
- * (turn summarization + journal append) is not yet wired up.
+ * Requires the `memsearch` CLI on PATH:  uv tool install "memsearch[onnx]"
+ * Backend + embedding provider are owned by memsearch's own config (zero-config).
+ * Optional: pin the provider on index + search with --memsearch-provider (D1).
  */
 
-import { spawn } from "node:child_process";
-import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerCapture } from "./capture";
+import { MEMSEARCH_PROVIDER_FLAG, type MemoryChunk, searchMemory } from "./memsearch";
+import { registerRecallSurfaces } from "./recall";
 
-/** Run the memsearch CLI and capture stdout. */
-function runMemsearch(args: string[], signal?: AbortSignal): Promise<{ stdout: string; stderr: string; code: number }> {
-	return new Promise((resolve, reject) => {
-		const child = spawn("memsearch", args, { signal });
-		let stdout = "";
-		let stderr = "";
-		child.stdout.on("data", (d) => (stdout += d.toString()));
-		child.stderr.on("data", (d) => (stderr += d.toString()));
-		child.on("error", reject);
-		child.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
+const COLD_START_TOP_K = 3;
+
+export default function (pi: ExtensionAPI): void {
+	// Optional embedding-provider pin (D1). Unset = zero-config (memsearch owns the provider).
+	pi.registerFlag(MEMSEARCH_PROVIDER_FLAG, {
+		type: "string",
+		description:
+			"Pin the memsearch embedding provider (e.g. onnx) on index + search so index-time and search-time providers cannot diverge. Unset defers to memsearch config.",
 	});
-}
 
-const memoryRecallTool = defineTool({
-	name: "memory_recall",
-	label: "Memory Recall",
-	description:
-		"Search long-term memory of past sessions using memsearch (hybrid semantic + keyword search). " +
-		"Use when the user references a prior conversation, decision, or context not present in the current session.",
-	parameters: Type.Object({
-		query: Type.String({ description: "What to recall, in natural language." }),
-		topK: Type.Optional(Type.Number({ description: "Max results to return (default 5).", default: 5 })),
-	}),
+	registerRecallSurfaces(pi);
+	registerCapture(pi);
 
-	async execute(_toolCallId, params, signal) {
-		const topK = params.topK ?? 5;
-		const { stdout, stderr, code } = await runMemsearch(
-			["search", params.query, "--top-k", String(topK), "--json-output"],
-			signal,
-		);
+	// Cold-start recall: once per session, on the first user prompt, inject
+	// memories relevant to that prompt. Never per-turn (research constraint).
+	let coldStartDone = false;
+	let coldStartWarned = false; // warn-once latch so a persistent failure doesn't toast every prompt
+	const resetColdStart = (): void => {
+		coldStartDone = false;
+		coldStartWarned = false;
+	};
 
-		if (code !== 0) {
-			return {
-				content: [
-					{
-						type: "text",
-						text:
-							`memsearch search failed (exit ${code}). Is the CLI installed and configured?\n` +
-							`Install: uv tool install "memsearch[onnx]"\n\n${stderr.trim()}`,
-					},
-				],
-				isError: true,
-			};
+	pi.on("session_start", async () => resetColdStart());
+	// I6 — reset on fork/tree-switch too (mirrors capture), so the forked branch re-injects.
+	pi.on("session_tree", async () => resetColdStart());
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (coldStartDone) return;
+		if (!ctx.isProjectTrusted()) return; // I2 — no auto subprocess in untrusted projects (slot not burned)
+
+		const prompt = event.prompt?.trim();
+		if (!prompt) return; // Q1 — don't consume the slot on an empty/whitespace prompt
+
+		let chunks: MemoryChunk[];
+		try {
+			chunks = await searchMemory(prompt, COLD_START_TOP_K, {
+				cwd: ctx.sessionManager.getCwd(),
+				signal: ctx.signal,
+				provider: pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined, // D1
+			});
+		} catch (e) {
+			// Q3 — surface the failure (consistent with the capture path) rather than staying fully
+			// silent; the slot is NOT burned, so cold-start retries on the next prompt. The warn-once
+			// latch keeps a persistent failure (missing CLI / schema drift) from toasting every prompt.
+			if (ctx.hasUI && !coldStartWarned) {
+				coldStartWarned = true;
+				ctx.ui.notify(`memsearch cold-start recall failed: ${(e as Error).message}`, "warning");
+			}
+			return;
 		}
+		coldStartDone = true; // Q1 — consume the slot only after a successful search
+
+		if (chunks.length === 0) return;
+
+		const body = chunks
+			.map((c) => `- (${typeof c.score === "number" ? c.score.toFixed(2) : "n/a"}) ${c.heading || c.source}: ${c.content}`)
+			.join("\n");
 
 		return {
-			content: [{ type: "text", text: stdout.trim() || "No memories found." }],
-			details: { query: params.query, topK },
+			message: {
+				customType: "memsearch-coldstart",
+				content: `Relevant memories from past sessions (via memsearch):\n\n${body}`,
+				display: true,
+			},
 		};
-	},
-});
-
-export default function (pi: ExtensionAPI) {
-	pi.registerTool(memoryRecallTool);
-
-	// Convenience command mirroring memsearch's /memory-recall on other platforms.
-	pi.registerCommand?.({
-		name: "memory-recall",
-		description: "Search long-term memory (memsearch) for past context.",
-		async run(ctx: { args?: string }) {
-			const query = (ctx.args ?? "").trim();
-			if (!query) {
-				return { content: [{ type: "text", text: "Usage: /memory-recall <what to recall>" }] };
-			}
-			const { stdout, stderr, code } = await runMemsearch(["search", query, "--top-k", "5", "--json-output"]);
-			return {
-				content: [{ type: "text", text: code === 0 ? stdout.trim() || "No memories found." : stderr.trim() }],
-			};
-		},
 	});
 }

@@ -19,6 +19,9 @@ npm-debug.log*
 .env.*
 !.env.example
 
+# rpiv pipeline artifacts (local only)
+.rpiv/
+
 # Editor / OS
 .DS_Store
 .idea/
