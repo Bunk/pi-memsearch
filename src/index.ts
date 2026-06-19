@@ -15,7 +15,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCapture } from "./capture";
-import { MEMSEARCH_PROVIDER_FLAG, type MemoryChunk, searchMemory } from "./memsearch";
+import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, type MemoryChunk, searchMemory } from "./memsearch";
 import { registerRecallSurfaces } from "./recall";
 
 const COLD_START_TOP_K = 3;
@@ -53,11 +53,7 @@ export default function (pi: ExtensionAPI): void {
 
 		let chunks: MemoryChunk[];
 		try {
-			chunks = await searchMemory(prompt, COLD_START_TOP_K, {
-				cwd: ctx.sessionManager.getCwd(),
-				signal: ctx.signal,
-				provider: pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined, // D1
-			});
+			chunks = await searchMemory(prompt, COLD_START_TOP_K, memsearchOptions(pi, ctx.sessionManager.getCwd(), ctx.signal));
 		} catch (e) {
 			// Q3 — surface the failure (consistent with the capture path) rather than staying fully
 			// silent; the slot is NOT burned, so cold-start retries on the next prompt. The warn-once

@@ -17,7 +17,7 @@ import { defineTool, type ExtensionAPI, SessionManager } from "@earendil-works/p
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { isTurnEntry, listTurns, renderTurns, type TurnInfo } from "./conversation";
-import { expandChunk, MEMSEARCH_PROVIDER_FLAG, type MemoryChunk, searchMemory } from "./memsearch";
+import { expandChunk, memsearchOptions, type MemoryChunk, searchMemory } from "./memsearch";
 
 const UNTRUSTED_RESULT = {
 	content: [{ type: "text" as const, text: "Memory recall is disabled in untrusted projects." }],
@@ -46,8 +46,6 @@ export function isWithin(target: string, root: string): boolean {
 }
 
 export function createRecallTools(pi: ExtensionAPI) {
-	const providerFlag = (): string | undefined => pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined;
-
 	const memoryRecallTool = defineTool({
 		name: "memory_recall",
 		label: "Memory Recall",
@@ -66,11 +64,7 @@ export function createRecallTools(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) return UNTRUSTED_RESULT;
 			const topK = params.topK ?? 5;
-			const chunks = await searchMemory(params.query, topK, {
-				signal,
-				cwd: ctx.sessionManager.getCwd(),
-				provider: providerFlag(),
-			});
+			const chunks = await searchMemory(params.query, topK, memsearchOptions(pi, ctx.sessionManager.getCwd(), signal));
 			const text = chunks.length ? formatChunks(params.query, chunks) : "No memories found.";
 			return { content: [{ type: "text", text }], details: { query: params.query, topK, count: chunks.length } };
 		},
@@ -90,11 +84,7 @@ export function createRecallTools(pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) return UNTRUSTED_RESULT;
-			const result = await expandChunk(params.chunkHash, {
-				signal,
-				cwd: ctx.sessionManager.getCwd(),
-				provider: providerFlag(),
-			});
+			const result = await expandChunk(params.chunkHash, memsearchOptions(pi, ctx.sessionManager.getCwd(), signal));
 			const text =
 				`Source: ${result.source} (lines ${result.start_line}-${result.end_line})\n` +
 				`Heading: ${result.heading}\n\n${result.content}`;
@@ -177,10 +167,7 @@ export function registerRecallSurfaces(pi: ExtensionAPI): void {
 			}
 			let chunks: MemoryChunk[];
 			try {
-				chunks = await searchMemory(query, 5, {
-					cwd: ctx.sessionManager.getCwd(),
-					provider: pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined,
-				});
+				chunks = await searchMemory(query, 5, memsearchOptions(pi, ctx.sessionManager.getCwd()));
 			} catch (e) {
 				if (ctx.hasUI) ctx.ui.notify((e as Error).message, "error");
 				return;

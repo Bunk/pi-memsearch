@@ -38,7 +38,7 @@ import {
 	toBulletList,
 } from "./journal";
 import { withFileLock } from "./lock";
-import { indexMemory, MEMSEARCH_PROVIDER_FLAG } from "./memsearch";
+import { indexMemory, memsearchOptions } from "./memsearch";
 
 const SUMMARY_PROMPT = [
 	"Summarize the following exchange between a user and a coding assistant as 2-10 concise,",
@@ -116,11 +116,7 @@ export function registerCapture(pi: ExtensionAPI): void {
 	const runIndex = async (ctx: ExtensionContext): Promise<boolean> => {
 		const cwd = ctx.sessionManager.getCwd();
 		try {
-			await indexMemory([journalMemoryDir(cwd)], {
-				cwd,
-				signal: ctx.signal,
-				provider: pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined,
-			});
+			await indexMemory([journalMemoryDir(cwd)], memsearchOptions(pi, cwd, ctx.signal));
 			return true;
 		} catch (e) {
 			if (ctx.hasUI) ctx.ui.notify(`memsearch index failed: ${(e as Error).message}`, "warning");

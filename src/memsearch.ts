@@ -17,6 +17,8 @@
  */
 
 import { spawn } from "node:child_process";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { deriveCollection } from "./collection";
 import { SUBPROCESS_TIMEOUT_MS } from "./constants";
 import { withReadLock, withWriteLock } from "./lock";
 
@@ -50,6 +52,8 @@ export interface MemsearchOptions {
 	cwd?: string;
 	/** Optional embedding provider pin (D1); applied to search + index when set. */
 	provider?: string;
+	/** Optional per-project collection pin (collection isolation); applied to search + expand + index. */
+	collection?: string;
 }
 
 interface RunResult {
@@ -66,21 +70,27 @@ function providerArgs(opts: MemsearchOptions): string[] {
 	return opts.provider ? ["--provider", opts.provider] : [];
 }
 
+/** `--collection <c>` args when a collection is set, else nothing. Trusted (derived from cwd) so it
+ *  precedes the `--` separator like providerArgs (S1). */
+function collectionArgs(opts: MemsearchOptions): string[] {
+	return opts.collection ? ["--collection", opts.collection] : [];
+}
+
 /** Build argv for `memsearch search`. The untrusted `query` is placed after a literal
  *  `--` end-of-options separator (S1) so a value beginning with `--` is treated as data,
  *  not a flag. Trusted flags (providerArgs) precede the separator. Exported for testing. */
 export function buildSearchArgs(query: string, topK: number, opts: MemsearchOptions = {}): string[] {
-	return ["search", "--top-k", String(topK), "--json-output", ...providerArgs(opts), "--", query];
+	return ["search", "--top-k", String(topK), "--json-output", ...providerArgs(opts), ...collectionArgs(opts), "--", query];
 }
 
 /** Build argv for `memsearch expand`; untrusted `chunkHash` after `--` (S1). Exported for testing. */
-export function buildExpandArgs(chunkHash: string): string[] {
-	return ["expand", "--json-output", "--", chunkHash];
+export function buildExpandArgs(chunkHash: string, opts: MemsearchOptions = {}): string[] {
+	return ["expand", "--json-output", ...collectionArgs(opts), "--", chunkHash];
 }
 
 /** Build argv for `memsearch index`; untrusted `paths` after `--`, provider flags before (S1). Exported for testing. */
 export function buildIndexArgs(paths: string[], opts: MemsearchOptions = {}): string[] {
-	return ["index", ...providerArgs(opts), "--", ...paths];
+	return ["index", ...providerArgs(opts), ...collectionArgs(opts), "--", ...paths];
 }
 
 export function isMemoryChunk(x: unknown): x is MemoryChunk {
@@ -158,7 +168,7 @@ export async function searchMemory(query: string, topK = 5, opts: MemsearchOptio
 /** L2: expand a chunk to its full heading section. */
 export async function expandChunk(chunkHash: string, opts: MemsearchOptions = {}): Promise<ExpandResult> {
 	return withReadLock(async () => {
-		const { stdout, stderr, code } = await runMemsearch(buildExpandArgs(chunkHash), opts);
+		const { stdout, stderr, code } = await runMemsearch(buildExpandArgs(chunkHash, opts), opts);
 		if (code !== 0) fail("expand", code, stderr);
 		const trimmed = stdout.trim();
 		if (!trimmed) throw new Error(`memsearch expand returned no output for chunk ${chunkHash} (not found?).`);
@@ -181,4 +191,18 @@ export async function indexMemory(paths: string[], opts: MemsearchOptions = {}):
 		if (code !== 0) fail("index", code, stderr);
 		return stdout.trim();
 	});
+}
+
+/**
+ * Build MemsearchOptions for a call site: the per-project collection (collection isolation), the
+ * optional provider pin (D1), plus cwd + signal. Centralizes the flag read + collection derivation
+ * that the recall/capture/cold-start sites would otherwise each duplicate.
+ */
+export function memsearchOptions(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): MemsearchOptions {
+	return {
+		cwd,
+		signal,
+		provider: pi.getFlag(MEMSEARCH_PROVIDER_FLAG) as string | undefined,
+		collection: deriveCollection(cwd),
+	};
 }

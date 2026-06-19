@@ -67,6 +67,30 @@ test("buildIndexArgs places untrusted paths after -- with provider flags before 
 	assert.deepEqual(buildIndexArgs(["--evil.md", "b.md"], { provider: "onnx" }), ["index", "--provider", "onnx", "--", "--evil.md", "b.md"]);
 });
 
+test("buildSearchArgs places the trusted --collection before -- (S1)", () => {
+	const args = buildSearchArgs("q", 5, { collection: "ms_proj_abc12345" });
+	const sep = args.indexOf("--");
+	const ci = args.indexOf("--collection");
+	assert.ok(ci !== -1 && ci < sep, "--collection precedes the separator");
+	assert.equal(args[ci + 1], "ms_proj_abc12345");
+});
+
+test("buildSearchArgs combines provider + collection before -- (S1)", () => {
+	const args = buildSearchArgs("q", 3, { provider: "onnx", collection: "ms_proj_abc12345" });
+	const sep = args.indexOf("--");
+	assert.deepEqual(args.slice(0, sep), ["search", "--top-k", "3", "--json-output", "--provider", "onnx", "--collection", "ms_proj_abc12345"]);
+	assert.deepEqual(args.slice(sep), ["--", "q"]);
+});
+
+test("buildExpandArgs threads --collection before -- and keeps the hash after (S1)", () => {
+	assert.deepEqual(buildExpandArgs("h", { collection: "ms_proj_abc12345" }), ["expand", "--json-output", "--collection", "ms_proj_abc12345", "--", "h"]);
+	assert.deepEqual(buildExpandArgs("--evil"), ["expand", "--json-output", "--", "--evil"]); // no opts → unchanged
+});
+
+test("buildIndexArgs places provider + collection before -- and paths after (S1)", () => {
+	assert.deepEqual(buildIndexArgs(["a.md"], { provider: "onnx", collection: "ms_proj_abc12345" }), ["index", "--provider", "onnx", "--collection", "ms_proj_abc12345", "--", "a.md"]);
+});
+
 test("searchMemory throws on schema drift (non-empty payload, all rows invalid) (I4)", async () => {
 	process.env.MEMSEARCH_FAKE_EXIT = "0";
 	process.env.MEMSEARCH_FAKE_STDOUT = JSON.stringify([{ content: 123, source: "s" }]); // fails isMemoryChunk
