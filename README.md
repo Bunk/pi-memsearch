@@ -67,6 +67,19 @@ idempotent**: the journal append happens first and is deduplicated per entry, th
 marker is written only after a successful append, and indexing never promotes an unjournaled
 exchange. Resuming, reloading, or forking a session never double-writes.
 
+### Procedural memory (skills from memory)
+
+Turn a recurring workflow from your captured memory into an installed, reusable pi skill.
+
+| Surface | Backed by | Purpose |
+| --- | --- | --- |
+| `/skill:memory-to-skill` *(bundled skill)* | the recall tools + `create_skill` | Drives the agent to distill a workflow from memory (verifying exact commands via `memory_transcript`), draft a `SKILL.md`, and install it. |
+| `create_skill` *(tool)* | `memsearch skills add` + `install` | Persists an agent-drafted skill: writes a git-backed candidate, then installs it into `.agents/skills/<name>/SKILL.md`. |
+
+Ask *"make a skill out of what we just did"* (or run `/skill:memory-to-skill`). The new skill
+surfaces as `/skill:<name>` after the next reload. On-demand only — there is no background miner,
+and `create_skill` is trust-gated and path-confined like every other surface.
+
 ### Safety
 
 - **Trust-gated (fail-closed)** — every read path *and* the auto-firing capture/cold-start are
@@ -130,6 +143,12 @@ To search memory manually:
 
 The agent will also call `memory_recall` / `memory_expand` / `memory_transcript` on its own when
 you reference a prior conversation, decision, or context that isn't in the current session.
+
+To distill a reusable skill from what you've done:
+
+```
+/skill:memory-to-skill the deploy-and-smoke-test loop we just did
+```
 
 ### Configuration
 

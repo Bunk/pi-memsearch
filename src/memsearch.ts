@@ -93,6 +93,21 @@ export function buildIndexArgs(paths: string[], opts: MemsearchOptions = {}): st
 	return ["index", ...providerArgs(opts), ...collectionArgs(opts), "--", ...paths];
 }
 
+/** Build argv for `memsearch skills add`. `name`/`description` are untrusted *named-flag values* and
+ *  the (untrusted) body rides stdin via `--body-file -` (Dec4), so nothing untrusted becomes a
+ *  positional — with a fixed binary + array argv (no shell) there is no injection vector, so no `--`
+ *  separator is needed here (add has no positionals). Exported for testing. */
+export function buildSkillsAddArgs(name: string, description: string): string[] {
+	return ["skills", "add", "--name", name, "--description", description, "--body-file", "-"];
+}
+
+/** Build argv for `memsearch skills install`. The untrusted `slug` positional is placed after a
+ *  literal `--` end-of-options separator (S1); the trusted, cwd-derived `--path destDir` precedes it.
+ *  Exported for testing. */
+export function buildSkillsInstallArgs(slug: string, destDir: string): string[] {
+	return ["skills", "install", "--path", destDir, "--", slug];
+}
+
 export function isMemoryChunk(x: unknown): x is MemoryChunk {
 	if (!x || typeof x !== "object") return false;
 	const c = x as Record<string, unknown>;
@@ -117,8 +132,10 @@ export function isExpandResult(x: unknown): x is ExpandResult {
 	);
 }
 
-/** Run the memsearch CLI and capture stdout/stderr, with an abort+timeout signal (Q3). */
-function runMemsearch(args: string[], opts: MemsearchOptions = {}): Promise<RunResult> {
+/** Run the memsearch CLI and capture stdout/stderr, with an abort+timeout signal (Q3). When `input`
+ *  is provided it is written to the child's stdin and the stream is closed (Dec4 — used for
+ *  `skills add --body-file -` so the untrusted body never touches argv). */
+function runMemsearch(args: string[], opts: MemsearchOptions = {}, input?: string): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
 		const timeout = AbortSignal.timeout(SUBPROCESS_TIMEOUT_MS);
 		const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
@@ -129,6 +146,15 @@ function runMemsearch(args: string[], opts: MemsearchOptions = {}): Promise<RunR
 		child.stderr.on("data", (d) => (stderr += d.toString()));
 		child.on("error", reject);
 		child.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
+		if (input !== undefined) {
+			// Defer EPIPE only (Q5): if the child exits before draining stdin, the `close` handler
+			// still resolves with its exit code (which failSkills() turns into an actionable error).
+			// Any other stdin write error is genuine — reject so it is not silently masked.
+			child.stdin.on("error", (err: NodeJS.ErrnoException) => {
+				if (err.code !== "EPIPE") reject(err);
+			});
+			child.stdin.end(input);
+		}
 	});
 }
 
@@ -191,6 +217,53 @@ export async function indexMemory(paths: string[], opts: MemsearchOptions = {}):
 		if (code !== 0) fail("index", code, stderr);
 		return stdout.trim();
 	});
+}
+
+// Output shapes are pinned to memsearch v0.4.10. Both are line-anchored (/m) so a stray warning or
+// echo line resembling the result cannot win (Q4); the install capture is non-greedy + trimmed so a
+// future trailing token (e.g. `Installed: /x/SKILL.md (updated)`) is not glued onto the path (Q3).
+/** Slug echoed by `memsearch skills add`: `Added candidate skill: <slug>`. */
+const SKILL_ADD_SLUG_RE = /^Added candidate skill:\s*(\S+)/m;
+/** Absolute path echoed by `memsearch skills install`: `Installed: <abspath>`. */
+const SKILL_INSTALL_PATH_RE = /^Installed:\s*(.+?)\s*$/m;
+
+/** Non-zero-exit error for the skills paths. Unlike the shared fail() it omits the embedding/provider
+ *  config hint (CONFIG_HINT) — skills add/install do no embedding work, so that hint would mislead. */
+function failSkills(action: string, code: number, stderr: string): never {
+	throw new Error(`memsearch ${action} failed (exit ${code}). Is the CLI installed?\n${INSTALL_HINT}\n\n${stderr.trim()}`);
+}
+
+/**
+ * Persist an agent-drafted skill as a git-backed candidate (`memsearch skills add`), feeding the
+ * untrusted body over stdin (Dec4). Returns the slug the CLI assigned (parsed from stdout). No lock:
+ * the candidate store is file/git-backed, not the shared Milvus DB (Dec9).
+ */
+export async function addSkillCandidate(
+	name: string,
+	description: string,
+	body: string,
+	opts: MemsearchOptions = {},
+): Promise<string> {
+	const { stdout, stderr, code } = await runMemsearch(buildSkillsAddArgs(name, description), opts, body);
+	if (code !== 0) failSkills("skills add", code, stderr);
+	const slug = stdout.match(SKILL_ADD_SLUG_RE)?.[1];
+	if (!slug) throw new Error(`memsearch skills add: could not parse the candidate slug from output:\n${stdout.trim()}`);
+	return slug;
+}
+
+/**
+ * Install a candidate skill into `destDir` (`memsearch skills install <slug> --path destDir`).
+ * Returns the absolute installed SKILL.md path (parsed from stdout) so the caller can verify it exists
+ * and is within cwd before reporting success (I3/I7). No lock (Dec9).
+ */
+export async function installSkill(slug: string, destDir: string, opts: MemsearchOptions = {}): Promise<string> {
+	const { stdout, stderr, code } = await runMemsearch(buildSkillsInstallArgs(slug, destDir), opts);
+	if (code !== 0) failSkills("skills install", code, stderr);
+	const installed = stdout.match(SKILL_INSTALL_PATH_RE)?.[1]?.trim();
+	if (!installed) {
+		throw new Error(`memsearch skills install: could not parse the installed path from output:\n${stdout.trim()}`);
+	}
+	return installed;
 }
 
 /**

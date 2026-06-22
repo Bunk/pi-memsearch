@@ -4,6 +4,7 @@
  * - Recall:  memory_recall / memory_expand / memory_transcript tools + /memory-recall command
  * - Capture: summarize each exchange on agent_end, append to the daily journal, index
  * - Cold start: inject prompt-relevant memories on the first prompt of a session
+ * - Skills:  create_skill tool + bundled /memory-to-skill SKILL.md (procedural memory, on-demand)
  *
  * Trust (I2): the auto-firing cold-start spawns the memsearch CLI with no user
  * action, so it is gated on ctx.isProjectTrusted() like every other read path.
@@ -17,6 +18,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCapture } from "./capture";
 import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, type MemoryChunk, searchMemory } from "./memsearch";
 import { registerRecallSurfaces } from "./recall";
+import { registerSkillSurfaces } from "./skills";
 
 const COLD_START_TOP_K = 3;
 
@@ -29,6 +31,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	registerRecallSurfaces(pi);
+	registerSkillSurfaces(pi);
 	registerCapture(pi);
 
 	// Cold-start recall: once per session, on the first user prompt, inject
