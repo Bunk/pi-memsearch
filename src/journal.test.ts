@@ -7,6 +7,7 @@ import {
 	appendToJournal,
 	buildAnchor,
 	dailyJournalPath,
+	digestJournals,
 	ensureDailyFile,
 	formatDate,
 	formatExchangeBlock,
@@ -15,6 +16,7 @@ import {
 	journalHasEntry,
 	journalHasSession,
 	journalMemoryDir,
+	readRecentJournals,
 	toBulletList,
 } from "./journal";
 
@@ -122,6 +124,39 @@ test("journalHasEntry ignores a bare anchor-like substring in the body (S1)", as
 		assert.equal(await journalHasEntry(file, "evil", "LX"), false, "bare body substring must not satisfy the entry guard");
 		await appendToJournal(file, formatExchangeBlock({ date: new Date(2026, 0, 1, 8, 0), anchor: buildAnchor("evil", "LX", "x"), bullets: "- b" }));
 		assert.equal(await journalHasEntry(file, "evil", "LX"), true);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("digestJournals is deterministic, changes on edit, and is empty for a missing dir", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "memsearch-digest-"));
+	try {
+		assert.equal(await digestJournals(dir, 12), "sha256:empty");
+		const file = await ensureDailyFile(dir, new Date(2026, 0, 1, 9, 0));
+		await appendToJournal(file, formatExchangeBlock({ date: new Date(2026, 0, 1, 9, 0), anchor: buildAnchor("s", "t", "x"), bullets: "- a" }));
+		const d1 = await digestJournals(dir, 12);
+		assert.match(d1, /^sha256:[0-9a-f]{64}$/);
+		assert.equal(await digestJournals(dir, 12), d1, "deterministic for unchanged journals");
+		await appendToJournal(file, formatExchangeBlock({ date: new Date(2026, 0, 1, 9, 5), anchor: buildAnchor("s", "t2", "x"), bullets: "- b" }));
+		assert.notEqual(await digestJournals(dir, 12), d1, "digest changes when a journal changes");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("readRecentJournals returns the most recent daily files' contents", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "memsearch-recent-"));
+	try {
+		assert.equal(await readRecentJournals(dir, 12), "");
+		for (const day of [1, 2, 3]) {
+			const f = await ensureDailyFile(dir, new Date(2026, 0, day, 9, 0));
+			await appendToJournal(f, `\n- entry day ${day}\n`);
+		}
+		const recent2 = await readRecentJournals(dir, 2);
+		assert.match(recent2, /entry day 2/);
+		assert.match(recent2, /entry day 3/);
+		assert.doesNotMatch(recent2, /entry day 1/);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

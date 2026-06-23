@@ -10,7 +10,8 @@
  *     - bullet
  */
 
-import { appendFile, mkdir, open, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -31,6 +32,66 @@ export function journalMemoryDir(cwd: string): string {
 /** Absolute path to the daily journal file for `date`. */
 export function dailyJournalPath(cwd: string, date: Date): string {
 	return join(journalMemoryDir(cwd), `${formatDate(date)}.md`);
+}
+
+/** The most recent `limit` daily journal basenames (YYYY-MM-DD.md sorts chronologically). Shared by
+ *  digestJournals + readRecentJournals so the change-detection gate and the synthesis input cover the
+ *  SAME set of journals (Step-9 finding #4). Missing dir → []. */
+async function recentDailyNames(cwd: string, limit: number): Promise<string[]> {
+	let names: string[];
+	try {
+		names = await readdir(journalMemoryDir(cwd));
+	} catch {
+		return [];
+	}
+	return names
+		.filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n))
+		.sort()
+		.slice(-Math.max(0, limit));
+}
+
+/**
+ * SHA-256 digest over the most recent `limit` daily journals (basename + raw bytes, sorted),
+ * mirroring upstream maintenance.py::_input_digest but scoped to the SAME recent-N window the
+ * synthesis consumes (finding #4 — so an edit outside the window doesn't trip a run whose input can't
+ * reflect it). Drives the semantic layer's "journals changed" gate. No journals → "sha256:empty".
+ */
+export async function digestJournals(cwd: string, limit: number): Promise<string> {
+	const dir = journalMemoryDir(cwd);
+	const names = await recentDailyNames(cwd, limit);
+	if (names.length === 0) return "sha256:empty";
+	const h = createHash("sha256");
+	for (const name of names) {
+		let bytes: Buffer;
+		try {
+			bytes = await readFile(join(dir, name));
+		} catch {
+			continue; // file vanished between listing and read — skip, don't abort the digest
+		}
+		h.update(name);
+		h.update("\0");
+		h.update(bytes);
+		h.update("\0");
+	}
+	return `sha256:${h.digest("hex")}`;
+}
+
+/**
+ * Concatenated contents of the most recent `limit` daily journal files — the synthesis input for the
+ * semantic layer, covering the same window digestJournals hashes. Missing dir → "".
+ */
+export async function readRecentJournals(cwd: string, limit: number): Promise<string> {
+	const dir = journalMemoryDir(cwd);
+	const names = await recentDailyNames(cwd, limit);
+	const parts: string[] = [];
+	for (const name of names) {
+		try {
+			parts.push(await readFile(join(dir, name), "utf8"));
+		} catch {
+			// skip an unreadable file
+		}
+	}
+	return parts.join("\n");
 }
 
 /** Anchor comment linking a memory entry back to its pi session + turn for L3 drill-down. */

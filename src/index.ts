@@ -16,8 +16,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCapture } from "./capture";
-import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, type MemoryChunk, searchMemory } from "./memsearch";
+import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, searchMemory } from "./memsearch";
 import { registerRecallSurfaces } from "./recall";
+import { readSemanticNotes, registerSemanticSurfaces } from "./semantic";
 import { registerSkillSurfaces } from "./skills";
 
 const COLD_START_TOP_K = 3;
@@ -33,14 +34,21 @@ export default function (pi: ExtensionAPI): void {
 	registerRecallSurfaces(pi);
 	registerSkillSurfaces(pi);
 	registerCapture(pi);
+	// Registered AFTER registerCapture so the gated agent_end synthesis observes the journal
+	// this turn just wrote (D5).
+	registerSemanticSurfaces(pi);
 
-	// Cold-start recall: once per session, on the first user prompt, inject
-	// memories relevant to that prompt. Never per-turn (research constraint).
-	let coldStartDone = false;
-	let coldStartWarned = false; // warn-once latch so a persistent failure doesn't toast every prompt
+	// Cold-start injection: once per session, on the first user prompt, inject (a) the durable
+	// semantic notes (PROJECT.md/USER.md, D4) and (b) prompt-relevant episodic recall. Never
+	// per-turn (research constraint). Two independent latches so a recall failure still lets recall
+	// retry next prompt while the (prompt-independent) notes inject exactly once.
+	let coldStartDone = false; // episodic recall injected
+	let coldStartWarned = false; // warn-once latch so a persistent recall failure doesn't toast every prompt
+	let notesInjected = false; // durable notes injected (independent of recall)
 	const resetColdStart = (): void => {
 		coldStartDone = false;
 		coldStartWarned = false;
+		notesInjected = false;
 	};
 
 	pi.on("session_start", async () => resetColdStart());
@@ -48,37 +56,51 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_tree", async () => resetColdStart());
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (coldStartDone) return;
-		if (!ctx.isProjectTrusted()) return; // I2 — no auto subprocess in untrusted projects (slot not burned)
+		if (coldStartDone && notesInjected) return; // nothing left to inject this session
+		if (!ctx.isProjectTrusted()) return; // I2 — no auto read/subprocess in untrusted projects (slots not burned)
 
 		const prompt = event.prompt?.trim();
-		if (!prompt) return; // Q1 — don't consume the slot on an empty/whitespace prompt
+		if (!prompt) return; // Q1 — don't consume a slot on an empty/whitespace prompt
 
-		let chunks: MemoryChunk[];
-		try {
-			chunks = await searchMemory(prompt, COLD_START_TOP_K, memsearchOptions(pi, ctx.sessionManager.getCwd(), ctx.signal));
-		} catch (e) {
-			// Q3 — surface the failure (consistent with the capture path) rather than staying fully
-			// silent; the slot is NOT burned, so cold-start retries on the next prompt. The warn-once
-			// latch keeps a persistent failure (missing CLI / schema drift) from toasting every prompt.
-			if (ctx.hasUI && !coldStartWarned) {
-				coldStartWarned = true;
-				ctx.ui.notify(`memsearch cold-start recall failed: ${(e as Error).message}`, "warning");
+		const cwd = ctx.sessionManager.getCwd();
+		const sections: string[] = [];
+
+		// (a) Durable semantic notes (D4): prompt-independent, cheap file reads, injected once.
+		if (!notesInjected) {
+			try {
+				const notes = await readSemanticNotes(cwd);
+				notesInjected = true; // mark even when empty so we don't re-read the notes every prompt
+				if (notes) sections.push(notes);
+			} catch {
+				// best-effort — leave notesInjected false to retry next prompt
 			}
-			return;
 		}
-		coldStartDone = true; // Q1 — consume the slot only after a successful search
 
-		if (chunks.length === 0) return;
+		// (b) Prompt-relevant episodic recall.
+		if (!coldStartDone) {
+			try {
+				const chunks = await searchMemory(prompt, COLD_START_TOP_K, memsearchOptions(pi, cwd, ctx.signal));
+				coldStartDone = true; // Q1 — consume the slot only after a successful search
+				if (chunks.length) {
+					const body = chunks
+						.map((c) => `- (${typeof c.score === "number" ? c.score.toFixed(2) : "n/a"}) ${c.heading || c.source}: ${c.content}`)
+						.join("\n");
+					sections.push(`Relevant memories from past sessions (via memsearch):\n\n${body}`);
+				}
+			} catch (e) {
+				// Q3 — surface the recall failure (slot NOT burned, retries next prompt); warn-once.
+				if (ctx.hasUI && !coldStartWarned) {
+					coldStartWarned = true;
+					ctx.ui.notify(`memsearch cold-start recall failed: ${(e as Error).message}`, "warning");
+				}
+			}
+		}
 
-		const body = chunks
-			.map((c) => `- (${typeof c.score === "number" ? c.score.toFixed(2) : "n/a"}) ${c.heading || c.source}: ${c.content}`)
-			.join("\n");
-
+		if (sections.length === 0) return;
 		return {
 			message: {
 				customType: "memsearch-coldstart",
-				content: `Relevant memories from past sessions (via memsearch):\n\n${body}`,
+				content: sections.join("\n\n"),
 				display: true,
 			},
 		};
