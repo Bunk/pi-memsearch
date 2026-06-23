@@ -23,8 +23,8 @@
  * call), which does not run the agent loop and cannot re-fire agent_end.
  */
 
-import { complete } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { runCompletion } from "./completion";
 import { type ConversationMessage, extractExchangeText } from "./conversation";
 import {
 	appendToJournal,
@@ -55,34 +55,7 @@ const RAW_FALLBACK_CHARS = 1500;
 const SUMMARY_TIMEOUT_MS = 60_000;
 
 async function summarizeExchange(ctx: ExtensionContext, exchangeText: string): Promise<string> {
-	const model = ctx.model;
-	if (!model) return "";
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) return "";
-	try {
-		const timeout = AbortSignal.timeout(SUMMARY_TIMEOUT_MS);
-		const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
-		const response = await complete(
-			model,
-			{
-				messages: [
-					{
-						role: "user" as const,
-						content: [{ type: "text" as const, text: buildSummaryPrompt(exchangeText) }],
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{ apiKey: auth.apiKey, headers: auth.headers, signal },
-		);
-		return response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n")
-			.trim();
-	} catch {
-		return "";
-	}
+	return runCompletion(ctx, buildSummaryPrompt(exchangeText), SUMMARY_TIMEOUT_MS);
 }
 
 /** Rebuild the capture bookkeeping sets from a session branch (pure; exported for testing). */
