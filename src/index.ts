@@ -16,6 +16,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCapture } from "./capture";
+import { registerConfigSurfaces } from "./config";
 import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, searchMemory } from "./memsearch";
 import { registerRecallSurfaces } from "./recall";
 import { readSemanticNotes, registerSemanticSurfaces } from "./semantic";
@@ -33,6 +34,9 @@ export default function (pi: ExtensionAPI): void {
 
 	registerRecallSurfaces(pi);
 	registerSkillSurfaces(pi);
+	// Read-only diagnostics (/memory-status) + reset (/memory-reset). Registers no agent_end handler,
+	// so it slots here freely (D5 only constrains the capture → semantic agent_end order below).
+	registerConfigSurfaces(pi);
 	registerCapture(pi);
 	// Registered AFTER registerCapture so the gated agent_end synthesis observes the journal
 	// this turn just wrote (D5).

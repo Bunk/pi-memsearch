@@ -34,20 +34,24 @@ export function dailyJournalPath(cwd: string, date: Date): string {
 	return join(journalMemoryDir(cwd), `${formatDate(date)}.md`);
 }
 
-/** The most recent `limit` daily journal basenames (YYYY-MM-DD.md sorts chronologically). Shared by
- *  digestJournals + readRecentJournals so the change-detection gate and the synthesis input cover the
- *  SAME set of journals (Step-9 finding #4). Missing dir → []. */
-async function recentDailyNames(cwd: string, limit: number): Promise<string[]> {
+/** All daily journal basenames (YYYY-MM-DD.md), chronologically sorted. Missing dir → []. The single
+ *  filter/sort definition shared by recentDailyNames + the /memory-status diagnostics report (Dec6). */
+export async function listDailyJournals(cwd: string): Promise<string[]> {
 	let names: string[];
 	try {
 		names = await readdir(journalMemoryDir(cwd));
 	} catch {
 		return [];
 	}
-	return names
-		.filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n))
-		.sort()
-		.slice(-Math.max(0, limit));
+	return names.filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).sort();
+}
+
+/** The most recent `limit` daily journal basenames (YYYY-MM-DD.md sorts chronologically). Shared by
+ *  digestJournals + readRecentJournals so the change-detection gate and the synthesis input cover the
+ *  SAME set of journals (Step-9 finding #4). Delegates to listDailyJournals for one filter/sort
+ *  definition (Dec6). Missing dir → []. */
+async function recentDailyNames(cwd: string, limit: number): Promise<string[]> {
+	return (await listDailyJournals(cwd)).slice(-Math.max(0, limit));
 }
 
 /**

@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { deriveCollection } from "./collection";
 import { SUBPROCESS_TIMEOUT_MS } from "./constants";
+import { journalMemoryDir } from "./journal";
 import { withReadLock, withWriteLock } from "./lock";
 
 /** Name of the optional pi flag that pins the embedding provider (D1). */
@@ -91,6 +92,22 @@ export function buildExpandArgs(chunkHash: string, opts: MemsearchOptions = {}):
 /** Build argv for `memsearch index`; untrusted `paths` after `--`, provider flags before (S1). Exported for testing. */
 export function buildIndexArgs(paths: string[], opts: MemsearchOptions = {}): string[] {
 	return ["index", ...providerArgs(opts), ...collectionArgs(opts), "--", ...paths];
+}
+
+/** Build argv for `memsearch stats`. Read-only count; no embedding so no providerArgs, and no
+ *  untrusted positionals so no `--` separator (named-flag-only, like skills add). `collectionArgs`
+ *  scopes the count to the project's collection (else it counts the shared global collection).
+ *  Exported for testing. */
+export function buildStatsArgs(opts: MemsearchOptions = {}): string[] {
+	return ["stats", ...collectionArgs(opts)];
+}
+
+/** Build argv for `memsearch reset`. `--yes` (LONG flag — v0.4.10 has no `-y`) bypasses the CLI's
+ *  confirmation so the EXTENSION owns confirmation (Dec10). `collectionArgs` is mandatory: an
+ *  unscoped reset drops the shared global collection holding every project's memories. No embedding
+ *  so no providerArgs (like buildExpandArgs); no untrusted positionals so no `--`. Exported for testing. */
+export function buildResetArgs(opts: MemsearchOptions = {}): string[] {
+	return ["reset", "--yes", ...collectionArgs(opts)];
 }
 
 /** Build argv for `memsearch skills add`. `name`/`description` are untrusted *named-flag values* and
@@ -216,6 +233,48 @@ export async function indexMemory(paths: string[], opts: MemsearchOptions = {}):
 		const { stdout, stderr, code } = await runMemsearch(buildIndexArgs(paths, opts), opts);
 		if (code !== 0) fail("index", code, stderr);
 		return stdout.trim();
+	});
+}
+
+// Output shape pinned to memsearch v0.4.10: `stats` emits exactly `Total indexed chunks: N` (no
+// --json-output support). Line-anchored (/m) so a stray warning line can't win; non-greedy digit
+// capture. The fake-binary harness masks output drift — live-verify against the real binary (Q4).
+const STATS_COUNT_RE = /^Total indexed chunks:\s+(\d+)$/m;
+
+/** Indexed-chunk count for the project's collection (diagnostics). Read path → withReadLock. Throws
+ *  on non-zero exit (fail) or unparseable output; the /memory-status caller catches and renders the
+ *  count as unavailable (Dec11) so a broken CLI doesn't sink the whole report. */
+export async function getStats(opts: MemsearchOptions = {}): Promise<number> {
+	return withReadLock(async () => {
+		const { stdout, stderr, code } = await runMemsearch(buildStatsArgs(opts), opts);
+		if (code !== 0) fail("stats", code, stderr);
+		const m = stdout.match(STATS_COUNT_RE);
+		if (!m) throw new Error(`memsearch stats: could not parse the chunk count from output:\n${stdout.trim()}`);
+		return Number(m[1]);
+	});
+}
+
+/**
+ * Drop the project's collection, then auto-reindex the surviving journals (D3) — both inside a SINGLE
+ * withWriteLock body so no concurrent cross-process reader (searchMemory/getStats) can observe the
+ * emptied collection between the drop and the rebuild (I1). The drop and reindex are issued as direct
+ * runMemsearch calls (buildResetArgs / buildIndexArgs) rather than calling indexMemory(), because the
+ * global write lock is NOT reentrant and indexMemory() would self-acquire it — nesting would deadlock.
+ * The journal markdown survives the drop (reset clears the index, not the source), so the reindex
+ * rebuilds the same per-project collection with the pinned provider (idempotent). Returns a status
+ * line. With no cwd the reindex is skipped (drop only).
+ */
+export async function resetMemory(opts: MemsearchOptions = {}): Promise<string> {
+	return withWriteLock(async () => {
+		const reset = await runMemsearch(buildResetArgs(opts), opts);
+		if (reset.code !== 0) fail("reset", reset.code, reset.stderr);
+		if (!opts.cwd) return "Dropped collection (no cwd — skipped reindex).";
+		// Direct runMemsearch(buildIndexArgs(...)) — NOT indexMemory() — to stay inside THIS lock
+		// (indexMemory self-acquires the non-reentrant write lock; nesting would deadlock). Same argv.
+		const idx = await runMemsearch(buildIndexArgs([journalMemoryDir(opts.cwd)], opts), opts);
+		if (idx.code !== 0) fail("index", idx.code, idx.stderr);
+		const out = idx.stdout.trim();
+		return `Dropped collection and reindexed journals.${out ? ` ${out}` : ""}`;
 	});
 }
 

@@ -9,9 +9,13 @@ import { digestJournals, ensureDailyFile } from "./journal";
 import { readState } from "./maintenance-state";
 import {
 	applyMaintenanceResult,
+	enabledTasks,
+	intervalMs,
+	listSemanticNotes,
 	parseMaintenanceResult,
 	PROJECT_REVIEW_FLAG,
 	readSemanticNotes,
+	REVIEW_INTERVAL_FLAG,
 	runDueSemanticTasks,
 	USER_PROFILE_FLAG,
 } from "./semantic";
@@ -104,6 +108,32 @@ test("readSemanticNotes is empty without notes and combines present notes", asyn
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
+});
+
+test("listSemanticNotes reports presence + mtime, keeping notePath/TASKS private", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sem-notes-"));
+	try {
+		const none = await listSemanticNotes(cwd);
+		assert.deepEqual(none.map((n) => [n.file, n.exists]), [["PROJECT.md", false], ["USER.md", false]]);
+		assert.equal(none[0].mtime, null);
+		await mkdir(join(cwd, ".memsearch"), { recursive: true });
+		await writeFile(join(cwd, ".memsearch", "PROJECT.md"), "# Project Memory\n", "utf8");
+		const some = await listSemanticNotes(cwd);
+		const project = some.find((n) => n.id === "project_review")!;
+		assert.equal(project.exists, true);
+		assert.ok(project.mtime instanceof Date);
+		assert.equal(some.find((n) => n.id === "user_profile")!.exists, false);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("enabledTasks + intervalMs are exported and read flags", () => {
+	assert.deepEqual(enabledTasks(fakePi({ [PROJECT_REVIEW_FLAG]: true })), ["project_review"]);
+	assert.deepEqual(enabledTasks(fakePi({})), []);
+	assert.equal(intervalMs(fakePi({})), 24 * HOUR, "default 24h");
+	assert.equal(intervalMs(fakePi({ [REVIEW_INTERVAL_FLAG]: "1" })), HOUR);
+	assert.equal(intervalMs(fakePi({ [REVIEW_INTERVAL_FLAG]: "-5" })), 24 * HOUR, "negative → default");
 });
 
 test("runDueSemanticTasks is a no-op with no flags (no state, no note)", async () => {

@@ -16,6 +16,7 @@ import {
 	journalHasEntry,
 	journalHasSession,
 	journalMemoryDir,
+	listDailyJournals,
 	readRecentJournals,
 	toBulletList,
 } from "./journal";
@@ -140,6 +141,19 @@ test("digestJournals is deterministic, changes on edit, and is empty for a missi
 		assert.equal(await digestJournals(dir, 12), d1, "deterministic for unchanged journals");
 		await appendToJournal(file, formatExchangeBlock({ date: new Date(2026, 0, 1, 9, 5), anchor: buildAnchor("s", "t2", "x"), bullets: "- b" }));
 		assert.notEqual(await digestJournals(dir, 12), d1, "digest changes when a journal changes");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("listDailyJournals returns all daily basenames sorted; missing dir → []", async () => {
+	assert.deepEqual(await listDailyJournals("/no/such/dir"), []);
+	const dir = await mkdtemp(join(tmpdir(), "memsearch-listjournals-"));
+	try {
+		for (const day of [3, 1, 2]) await ensureDailyFile(dir, new Date(2026, 0, day, 9, 0));
+		// a non-journal file must be ignored
+		await appendToJournal(join(dir, ".memsearch", "memory", "notes.md"), "x");
+		assert.deepEqual(await listDailyJournals(dir), ["2026-01-01.md", "2026-01-02.md", "2026-01-03.md"]);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

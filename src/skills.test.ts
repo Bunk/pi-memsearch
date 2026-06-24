@@ -119,8 +119,11 @@ test("registerSkillSurfaces registers create_skill and contributes the bundled S
 	assert.ok(registered.includes("create_skill"), "create_skill tool registered");
 	assert.ok(discover, "resources_discover handler registered");
 	const res = await discover!();
-	assert.equal(res.skillPaths?.length, 1, "one skill path contributed");
-	const p = res.skillPaths![0];
-	assert.ok(existsSync(p), `bundled SKILL.md exists at ${p}`);
-	assert.match(readFileSync(p, "utf8"), /name:\s*memory-to-skill[\s\S]*description:/, "has name+description frontmatter");
+	assert.equal(res.skillPaths?.length, 2, "two skill paths contributed (memory-to-skill + memory-config)");
+	const paths = res.skillPaths!;
+	for (const p of paths) assert.ok(existsSync(p), `bundled SKILL.md exists at ${p}`);
+	const byName = Object.fromEntries(paths.map((p) => [readFileSync(p, "utf8").match(/name:\s*(\S+)/)?.[1], p]));
+	assert.ok(byName["memory-to-skill"], "memory-to-skill path contributed");
+	assert.ok(byName["memory-config"], "memory-config path contributed");
+	assert.match(readFileSync(byName["memory-config"], "utf8"), /name:\s*memory-config[\s\S]*description:/, "memory-config has name+description frontmatter");
 });

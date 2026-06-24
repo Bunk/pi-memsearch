@@ -17,7 +17,7 @@ chmodSync(join(binDir, "memsearch"), 0o755);
 process.env.PI_MEMSEARCH_LOCK_DIR = join(tmpRoot, "lock");
 process.env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
 
-const { addSkillCandidate, buildExpandArgs, buildIndexArgs, buildSearchArgs, buildSkillsAddArgs, buildSkillsInstallArgs, installSkill, isExpandResult, isMemoryChunk, searchMemory } = await import("./memsearch");
+const { addSkillCandidate, buildExpandArgs, buildIndexArgs, buildResetArgs, buildSearchArgs, buildSkillsAddArgs, buildSkillsInstallArgs, buildStatsArgs, getStats, installSkill, isExpandResult, isMemoryChunk, resetMemory, searchMemory } = await import("./memsearch");
 
 after(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
@@ -176,6 +176,70 @@ test("installSkill rejects on a non-zero exit (failSkills path, Q1)", async () =
 	process.env.MEMSEARCH_FAKE_EXIT = "1";
 	try {
 		await assert.rejects(installSkill("my-skill", "/abs/cwd/.agents/skills"), /skills install failed \(exit 1\)/);
+	} finally {
+		process.env.MEMSEARCH_FAKE_EXIT = "0";
+	}
+});
+
+test("buildStatsArgs scopes by collection, no -- and no provider", () => {
+	assert.deepEqual(buildStatsArgs({ collection: "ms_proj_abc12345" }), ["stats", "--collection", "ms_proj_abc12345"]);
+	assert.deepEqual(buildStatsArgs(), ["stats"]);
+	assert.deepEqual(buildStatsArgs({ provider: "onnx" }), ["stats"]); // stats does no embedding
+});
+
+test("buildResetArgs emits the LONG --yes + collection, omits provider, no -- (v0.4.10)", () => {
+	assert.deepEqual(buildResetArgs({ collection: "ms_proj_abc12345", provider: "onnx" }), ["reset", "--yes", "--collection", "ms_proj_abc12345"]);
+	const bare = buildResetArgs();
+	assert.deepEqual(bare, ["reset", "--yes"]);
+	assert.ok(!bare.includes("-y"), "no short -y (absent in v0.4.10)");
+});
+
+test("getStats parses the v0.4.10 single-line count", async () => {
+	process.env.MEMSEARCH_FAKE_EXIT = "0";
+	process.env.MEMSEARCH_FAKE_STDOUT = "Total indexed chunks: 142";
+	assert.equal(await getStats(), 142);
+});
+
+test("getStats throws on unparseable output (version drift)", async () => {
+	process.env.MEMSEARCH_FAKE_EXIT = "0";
+	process.env.MEMSEARCH_FAKE_STDOUT = "something unexpected";
+	await assert.rejects(getStats(), /could not parse the chunk count/);
+});
+
+test("getStats throws on a non-zero exit (fail path)", async () => {
+	process.env.MEMSEARCH_FAKE_STDOUT = "";
+	process.env.MEMSEARCH_FAKE_EXIT = "1";
+	try {
+		await assert.rejects(getStats(), /stats failed \(exit 1\)/);
+	} finally {
+		process.env.MEMSEARCH_FAKE_EXIT = "0";
+	}
+});
+
+test("resetMemory drops then auto-reindexes the journals (D3), returning a status line", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "memsearch-reset-cwd-"));
+	try {
+		process.env.MEMSEARCH_FAKE_EXIT = "0";
+		process.env.MEMSEARCH_FAKE_STDOUT = "Indexed 9 files";
+		const out = await resetMemory({ cwd, collection: "ms_proj_abc12345" });
+		assert.match(out, /Dropped collection and reindexed journals\./);
+		assert.match(out, /Indexed 9 files/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("resetMemory with no cwd drops only, skipping the reindex (Q1)", async () => {
+	process.env.MEMSEARCH_FAKE_EXIT = "0";
+	process.env.MEMSEARCH_FAKE_STDOUT = "";
+	assert.equal(await resetMemory({ collection: "ms_x" }), "Dropped collection (no cwd — skipped reindex).");
+});
+
+test("resetMemory throws on a non-zero reset exit (before reindex)", async () => {
+	process.env.MEMSEARCH_FAKE_STDOUT = "";
+	process.env.MEMSEARCH_FAKE_EXIT = "1";
+	try {
+		await assert.rejects(resetMemory({ cwd: tmpRoot, collection: "ms_x" }), /reset failed \(exit 1\)/);
 	} finally {
 		process.env.MEMSEARCH_FAKE_EXIT = "0";
 	}

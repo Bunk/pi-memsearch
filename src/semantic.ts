@@ -20,7 +20,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { runCompletion } from "./completion";
 import { digestJournals, readRecentJournals } from "./journal";
@@ -198,7 +198,7 @@ async function runMaintenanceTask(ctx: ExtensionContext, cwd: string, taskId: Ma
 }
 
 /** Which tasks are opted in via flags. */
-function enabledTasks(pi: ExtensionAPI): MaintenanceTaskId[] {
+export function enabledTasks(pi: ExtensionAPI): MaintenanceTaskId[] {
 	const out: MaintenanceTaskId[] = [];
 	if (pi.getFlag(PROJECT_REVIEW_FLAG)) out.push("project_review");
 	if (pi.getFlag(USER_PROFILE_FLAG)) out.push("user_profile");
@@ -206,7 +206,7 @@ function enabledTasks(pi: ExtensionAPI): MaintenanceTaskId[] {
 }
 
 /** Min-interval in ms from the flag (string, parsed; default 24h; bad/negative -> default). */
-function intervalMs(pi: ExtensionAPI): number {
+export function intervalMs(pi: ExtensionAPI): number {
 	const raw = pi.getFlag(REVIEW_INTERVAL_FLAG) as string | undefined;
 	const n = raw != null ? Number(raw) : Number.NaN;
 	return (Number.isFinite(n) && n >= 0 ? n : DEFAULT_INTERVAL_HOURS) * HOUR_MS;
@@ -231,6 +231,31 @@ export async function runDueSemanticTasks(pi: ExtensionAPI, ctx: ExtensionContex
 		if (!isDue(state[id], digest, interval, now)) continue; // digest unchanged
 		await runMaintenanceTask(ctx, cwd, id, digest, now);
 	}
+}
+
+export interface SemanticNoteInfo {
+	id: MaintenanceTaskId;
+	file: string; // "PROJECT.md" | "USER.md"
+	path: string; // absolute
+	exists: boolean;
+	mtime: Date | null;
+}
+
+/** Presence + mtime of the durable note files (.memsearch/PROJECT.md, USER.md) for the /memory-status
+ *  report (Dec8). Keeps notePath/TASKS private; a missing note → { exists:false, mtime:null }. */
+export async function listSemanticNotes(cwd: string): Promise<SemanticNoteInfo[]> {
+	const out: SemanticNoteInfo[] = [];
+	for (const id of ["project_review", "user_profile"] as const) {
+		const task = TASKS[id];
+		const path = notePath(cwd, task);
+		try {
+			const st = await stat(path);
+			out.push({ id, file: task.file, path, exists: true, mtime: st.mtime });
+		} catch {
+			out.push({ id, file: task.file, path, exists: false, mtime: null });
+		}
+	}
+	return out;
 }
 
 /**

@@ -23,6 +23,7 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MEMORY_CONFIG_PATH } from "./config";
 import { addSkillCandidate, installSkill } from "./memsearch";
 import { isWithin } from "./recall";
 
@@ -99,5 +100,5 @@ export function createSkillTools() {
 /** Register the create_skill tool + contribute the bundled /memory-to-skill SKILL.md (Dec7). */
 export function registerSkillSurfaces(pi: ExtensionAPI): void {
 	for (const tool of createSkillTools()) pi.registerTool(tool);
-	pi.on("resources_discover", async () => ({ skillPaths: [MEMORY_TO_SKILL_PATH] }));
+	pi.on("resources_discover", async () => ({ skillPaths: [MEMORY_TO_SKILL_PATH, MEMORY_CONFIG_PATH] }));
 }
