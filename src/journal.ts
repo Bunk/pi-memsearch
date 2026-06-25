@@ -14,6 +14,10 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+/** Digest sentinel returned by digestJournals when no journals exist. Exported so the live re-index
+ *  empty-guard shares one definition (single source of truth). */
+export const EMPTY_JOURNAL_DIGEST = "sha256:empty";
+
 const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 export function formatDate(d: Date): string {
@@ -63,7 +67,7 @@ async function recentDailyNames(cwd: string, limit: number): Promise<string[]> {
 export async function digestJournals(cwd: string, limit: number): Promise<string> {
 	const dir = journalMemoryDir(cwd);
 	const names = await recentDailyNames(cwd, limit);
-	if (names.length === 0) return "sha256:empty";
+	if (names.length === 0) return EMPTY_JOURNAL_DIGEST;
 	const h = createHash("sha256");
 	for (const name of names) {
 		let bytes: Buffer;

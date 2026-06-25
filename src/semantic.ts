@@ -23,6 +23,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { runCompletion } from "./completion";
+import { RECENT_JOURNAL_LIMIT } from "./constants";
 import { digestJournals, readRecentJournals } from "./journal";
 import { withFileLock } from "./lock";
 import { intervalElapsed, isDue, type MaintenanceTaskId, readState, updateTaskState } from "./maintenance-state";
@@ -35,7 +36,6 @@ export const REVIEW_INTERVAL_FLAG = "memsearch-review-interval-hours";
 // awaits capture's 60s summarize first, so cap synthesis at 90s to keep the worst-case stacked
 // foreground block ~150s rather than ~180s (Step-9 finding #3).
 const SYNTHESIS_TIMEOUT_MS = 90_000;
-const RECENT_JOURNAL_LIMIT = 12;
 const DEFAULT_INTERVAL_HOURS = 24;
 const HOUR_MS = 3_600_000;
 
@@ -46,8 +46,13 @@ export interface MaintenanceResult {
 	content?: string;
 }
 
+/** The maintenance task ids the semantic layer owns. A strict subset of MaintenanceTaskId — the
+ *  third id (live_reindex) is a non-semantic re-index task (no note/instruction), so TASKS and the
+ *  synthesis functions are keyed by this narrower type, not the full union. */
+type SemanticTaskId = "project_review" | "user_profile";
+
 interface SemanticTask {
-	id: MaintenanceTaskId;
+	id: SemanticTaskId;
 	file: string; // note filename under .memsearch/
 	instruction: string;
 }
@@ -98,7 +103,7 @@ const USER_PROFILE_INSTRUCTION = [
 	"## Constraints",
 ].join("\n");
 
-const TASKS: Record<MaintenanceTaskId, SemanticTask> = {
+const TASKS: Record<SemanticTaskId, SemanticTask> = {
 	project_review: { id: "project_review", file: "PROJECT.md", instruction: PROJECT_REVIEW_INSTRUCTION },
 	user_profile: { id: "user_profile", file: "USER.md", instruction: USER_PROFILE_INSTRUCTION },
 };
@@ -157,7 +162,7 @@ function ensureTrailingNewline(s: string): string {
  */
 export async function applyMaintenanceResult(
 	cwd: string,
-	taskId: MaintenanceTaskId,
+	taskId: SemanticTaskId,
 	result: MaintenanceResult,
 	digest: string,
 	now: number,
@@ -180,7 +185,7 @@ export async function applyMaintenanceResult(
 }
 
 /** Run one task end-to-end: read journals + existing note -> complete() -> parse -> apply. */
-async function runMaintenanceTask(ctx: ExtensionContext, cwd: string, taskId: MaintenanceTaskId, digest: string, now: number): Promise<void> {
+async function runMaintenanceTask(ctx: ExtensionContext, cwd: string, taskId: SemanticTaskId, digest: string, now: number): Promise<void> {
 	const task = TASKS[taskId];
 	const recent = await readRecentJournals(cwd, RECENT_JOURNAL_LIMIT);
 	if (!recent.trim()) return; // nothing to synthesize from yet — don't mark, retry once journals exist
@@ -198,8 +203,8 @@ async function runMaintenanceTask(ctx: ExtensionContext, cwd: string, taskId: Ma
 }
 
 /** Which tasks are opted in via flags. */
-export function enabledTasks(pi: ExtensionAPI): MaintenanceTaskId[] {
-	const out: MaintenanceTaskId[] = [];
+export function enabledTasks(pi: ExtensionAPI): SemanticTaskId[] {
+	const out: SemanticTaskId[] = [];
 	if (pi.getFlag(PROJECT_REVIEW_FLAG)) out.push("project_review");
 	if (pi.getFlag(USER_PROFILE_FLAG)) out.push("user_profile");
 	return out;

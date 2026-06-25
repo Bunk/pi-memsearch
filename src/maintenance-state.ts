@@ -12,7 +12,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { withFileLock } from "./lock";
 
-export type MaintenanceTaskId = "project_review" | "user_profile";
+export type MaintenanceTaskId = "project_review" | "user_profile" | "live_reindex";
 
 /** Per-task record of the last successful run. */
 export interface TaskState {
@@ -24,7 +24,7 @@ export interface TaskState {
 /** The on-disk state: a record keyed by task id. */
 export type MaintenanceState = Partial<Record<MaintenanceTaskId, TaskState>>;
 
-const TASK_IDS: readonly MaintenanceTaskId[] = ["project_review", "user_profile"];
+const TASK_IDS: readonly MaintenanceTaskId[] = ["project_review", "user_profile", "live_reindex"];
 
 /** Absolute path to the project-global state file (sibling of memory/, mirrors upstream). */
 export function maintenanceStatePath(cwd: string): string {

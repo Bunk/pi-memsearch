@@ -19,6 +19,7 @@ import { registerCapture } from "./capture";
 import { registerConfigSurfaces } from "./config";
 import { MEMSEARCH_PROVIDER_FLAG, memsearchOptions, searchMemory } from "./memsearch";
 import { registerRecallSurfaces } from "./recall";
+import { registerReindex } from "./reindex";
 import { readSemanticNotes, registerSemanticSurfaces } from "./semantic";
 import { registerSkillSurfaces } from "./skills";
 
@@ -41,6 +42,11 @@ export default function (pi: ExtensionAPI): void {
 	// Registered AFTER registerCapture so the gated agent_end synthesis observes the journal
 	// this turn just wrote (D5).
 	registerSemanticSurfaces(pi);
+	// Live re-index (gap #4): digest-gated whole-dir reindex on before_agent_start. Registered
+	// BEFORE the cold-start before_agent_start handler below so its handler fires first and the
+	// same turn's cold-start recall reads the freshly-indexed external journals (registration-order
+	// dispatch, mirroring the D5 capture->semantic agent_end order).
+	registerReindex(pi);
 
 	// Cold-start injection: once per session, on the first user prompt, inject (a) the durable
 	// semantic notes (PROJECT.md/USER.md, D4) and (b) prompt-relevant episodic recall. Never
