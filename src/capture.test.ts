@@ -17,7 +17,7 @@ chmodSync(join(binDir, "memsearch"), 0o755);
 process.env.PI_MEMSEARCH_LOCK_DIR = join(tmpRoot, "lock");
 process.env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
 
-const { registerCapture, reconstructSets } = await import("./capture");
+const { registerCapture, reconstructSets, resolveSummaryModel } = await import("./capture");
 
 after(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
@@ -41,6 +41,7 @@ function makeHarness(harnessCwd = cwd) {
 			branch.push({ id: `c${branch.length}`, type: "custom", customType, data });
 		},
 		getFlag: () => undefined,
+		registerFlag: () => {},
 	};
 	registerCapture(pi as unknown as ExtensionAPI);
 	const ctx = {
@@ -191,6 +192,7 @@ test("agent_end is a no-op in an untrusted project (I2)", async () => {
 		},
 		appendEntry: (customType: string, data: unknown) => branch.push({ id: `c${branch.length}`, type: "custom", customType, data }),
 		getFlag: () => undefined,
+		registerFlag: () => {},
 	};
 	registerCapture(pi as unknown as ExtensionAPI);
 	const ctx = {
@@ -202,4 +204,42 @@ test("agent_end is a no-op in an untrusted project (I2)", async () => {
 	};
 	await handlers.agent_end({ messages: exchange } as unknown, ctx as unknown as ExtensionContext);
 	assert.equal(branch.length, 0, "untrusted project writes no bookkeeping");
+});
+
+// --- resolveSummaryModel (cheap-model pin) -------------------------------------------------------
+
+const M_HAIKU = { provider: "anthropic", id: "claude-haiku-4-5" };
+const M_GPT = { provider: "openai", id: "gpt-5-mini" };
+const ALL_MODELS = [M_HAIKU, M_GPT, { provider: "bedrock", id: "claude-haiku-4-5" }]; // dup id across providers
+
+function modelCtx() {
+	return {
+		modelRegistry: {
+			getAll: () => ALL_MODELS,
+			find: (provider: string, id: string) => ALL_MODELS.find((m) => m.provider === provider && m.id === id),
+		},
+	} as unknown as ExtensionContext;
+}
+const flagPi = (ref?: string) => ({ getFlag: () => ref }) as unknown as ExtensionAPI;
+
+test("resolveSummaryModel returns undefined when the flag is unset (use ctx.model)", () => {
+	assert.equal(resolveSummaryModel(flagPi(undefined), modelCtx()), undefined);
+	assert.equal(resolveSummaryModel(flagPi("   "), modelCtx()), undefined); // blank trims to unset
+});
+
+test("resolveSummaryModel resolves a provider/modelId reference", () => {
+	assert.equal(resolveSummaryModel(flagPi("openai/gpt-5-mini"), modelCtx()), M_GPT);
+});
+
+test("resolveSummaryModel resolves an unambiguous bare model id", () => {
+	assert.equal(resolveSummaryModel(flagPi("gpt-5-mini"), modelCtx()), M_GPT);
+});
+
+test("resolveSummaryModel returns undefined for an ambiguous bare id (dup across providers)", () => {
+	assert.equal(resolveSummaryModel(flagPi("claude-haiku-4-5"), modelCtx()), undefined);
+});
+
+test("resolveSummaryModel returns undefined for an unknown reference", () => {
+	assert.equal(resolveSummaryModel(flagPi("openai/nope"), modelCtx()), undefined);
+	assert.equal(resolveSummaryModel(flagPi("nope"), modelCtx()), undefined);
 });

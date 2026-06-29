@@ -85,7 +85,18 @@ export function extractToolCallLines(content: unknown): string[] {
 	return lines;
 }
 
-/** Serialize an exchange (agent_end event.messages) into User/Assistant text for summarization. */
+/**
+ * Serialize an exchange (agent_end event.messages) into User/Assistant text for summarization.
+ *
+ * The role filter is an ALLOWLIST (only `user`/`assistant` pass), which is load-bearing: agent_end
+ * delivers AgentMessage[] that also includes our own cold-start injections as `role:"custom"`
+ * CustomMessages (and bash output as `role:"bashExecution"`). Excluding everything but user/assistant
+ * keeps injected memories — the recalled past-session bullets and the durable PROJECT.md/USER.md notes
+ * — OUT of the summary input, so memory is never re-summarized back into the journal (a drift loop the
+ * upstream OpenClaw plugin instead handles by string-stripping injected blocks). Do NOT widen this to
+ * other roles without re-establishing that exclusion. (Locked by a regression test in
+ * conversation.test.ts.)
+ */
 export function extractExchangeText(messages: ConversationMessage[]): string {
 	const sections: string[] = [];
 	for (const message of messages) {

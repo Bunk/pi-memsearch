@@ -25,6 +25,29 @@
 
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { runCompletion } from "./completion";
+
+/** Optional cheap-model pin for capture summarization (mirrors --memsearch-provider for embeddings).
+ *  Unset = summarize with the session's current model (ctx.model). A pinned model keeps per-turn
+ *  summarization cost/latency off the (often expensive) primary model — upstream's Claude Code plugin
+ *  hardcodes `--model haiku` for the same reason. */
+export const SUMMARY_MODEL_FLAG = "memsearch-summary-model";
+
+/**
+ * Resolve the pinned summarize model from the flag, or undefined to fall back to ctx.model. Accepts a
+ * canonical `provider/modelId` reference, or a bare `modelId` when it is unambiguous across providers
+ * (mirroring pi's own model-reference matching). A bare id matching 0 or >1 models returns undefined
+ * so the caller can warn + fall back rather than silently pick the wrong provider. Exported for testing.
+ */
+export function resolveSummaryModel(pi: ExtensionAPI, ctx: ExtensionContext): ExtensionContext["model"] {
+	const ref = (pi.getFlag(SUMMARY_MODEL_FLAG) as string | undefined)?.trim();
+	if (!ref) return undefined;
+	if (ref.includes("/")) {
+		const i = ref.indexOf("/");
+		return ctx.modelRegistry.find(ref.slice(0, i), ref.slice(i + 1));
+	}
+	const matches = ctx.modelRegistry.getAll().filter((m) => m.id === ref);
+	return matches.length === 1 ? matches[0] : undefined; // bare id must be unambiguous
+}
 import { type ConversationMessage, extractExchangeText } from "./conversation";
 import {
 	appendToJournal,
@@ -54,8 +77,8 @@ const RAW_FALLBACK_CHARS = 1500;
 /** Q3 — cap the summarization call so a hung LLM request cannot wedge agent_end. */
 const SUMMARY_TIMEOUT_MS = 60_000;
 
-async function summarizeExchange(ctx: ExtensionContext, exchangeText: string): Promise<string> {
-	return runCompletion(ctx, buildSummaryPrompt(exchangeText), SUMMARY_TIMEOUT_MS);
+async function summarizeExchange(ctx: ExtensionContext, exchangeText: string, model: ExtensionContext["model"]): Promise<string> {
+	return runCompletion(ctx, buildSummaryPrompt(exchangeText), SUMMARY_TIMEOUT_MS, { model });
 }
 
 /** Rebuild the capture bookkeeping sets from a session branch (pure; exported for testing). */
@@ -75,11 +98,20 @@ export function reconstructSets(entries: readonly SessionEntry[]): { captured: S
 export function registerCapture(pi: ExtensionAPI): void {
 	let captured = new Set<string>(); // entryIds journaled — skip re-journal (I3)
 	let indexed = new Set<string>(); // entryIds confirmed indexed (I4)
+	let summaryModelWarned = false; // warn-once: a set-but-unresolvable summary-model flag
+
+	pi.registerFlag(SUMMARY_MODEL_FLAG, {
+		type: "string",
+		description:
+			"Pin a (cheap) model for capture summarization, e.g. 'anthropic/claude-haiku-4-5' or a bare unambiguous model id. " +
+			"The pinned model must be authenticated. Unset = summarize with the session's current model.",
+	});
 
 	const reconstruct = (ctx: ExtensionContext): void => {
 		const sets = reconstructSets(ctx.sessionManager.getBranch());
 		captured = sets.captured;
 		indexed = sets.indexed;
+		summaryModelWarned = false; // re-warn once per session / tree-switch (mirrors other warn-once latches)
 	};
 
 	pi.on("session_start", async (_event, ctx) => reconstruct(ctx));
@@ -104,7 +136,17 @@ export function registerCapture(pi: ExtensionAPI): void {
 		if (entryId && !captured.has(entryId)) {
 			const exchangeText = extractExchangeText(event.messages as unknown as ConversationMessage[]);
 			if (exchangeText.trim()) {
-				const summary = await summarizeExchange(ctx, exchangeText);
+				// Resolve the optional cheap-model pin; a set-but-unresolvable ref warns once and falls
+				// back to ctx.model (inside runCompletion) rather than degrading to the raw-text fallback.
+				const summaryModel = resolveSummaryModel(pi, ctx);
+				if (!summaryModel && pi.getFlag(SUMMARY_MODEL_FLAG) && ctx.hasUI && !summaryModelWarned) {
+					summaryModelWarned = true;
+					ctx.ui.notify(
+						`memsearch: --${SUMMARY_MODEL_FLAG} "${pi.getFlag(SUMMARY_MODEL_FLAG)}" matched no known model; summarizing with the session model.`,
+						"warning",
+					);
+				}
+				const summary = await summarizeExchange(ctx, exchangeText, summaryModel);
 				const bullets = toBulletList(summary.trim() || exchangeText.slice(0, RAW_FALLBACK_CHARS));
 
 				const cwd = ctx.sessionManager.getCwd();

@@ -35,6 +35,24 @@ test("extractExchangeText serializes user + assistant turns, drops others", () =
 	assert.doesNotMatch(text, /ignored/);
 });
 
+test("extractExchangeText EXCLUDES injected memory (role:custom) so it is never re-summarized", () => {
+	// agent_end delivers our cold-start injection as a role:"custom" CustomMessage. The allowlist must
+	// drop it (and bashExecution) so recalled memories / durable notes don't loop back into the journal.
+	const text = extractExchangeText([
+		{ role: "custom", content: "Relevant memories from past sessions (via memsearch):\n\n- secret leaked bullet" } as never,
+		{ role: "custom", content: "Durable project & user memory (via memsearch):\n\n# Project Memory" } as never,
+		{ role: "bashExecution", content: "orphan bash output" } as never,
+		{ role: "user", content: "real question" },
+		{ role: "assistant", content: [{ type: "text", text: "real answer" }] },
+	]);
+	assert.match(text, /User: real question/);
+	assert.match(text, /Assistant: real answer/);
+	assert.doesNotMatch(text, /Relevant memories from past sessions/);
+	assert.doesNotMatch(text, /Durable project & user memory/);
+	assert.doesNotMatch(text, /secret leaked bullet/);
+	assert.doesNotMatch(text, /orphan bash output/);
+});
+
 test("isTurnEntry narrows message entries with a string role (review finding 5)", () => {
 	// Real getBranch() elements are SessionEntry; the guard validates the message.role field.
 	assert.equal(isTurnEntry({ id: "a", type: "message", message: { role: "user", content: "hi" } } as never), true);
