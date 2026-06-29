@@ -5,11 +5,20 @@
  * - project_review -> .memsearch/PROJECT.md   - user_profile -> .memsearch/USER.md
  *
  * Trigger (D5): runDueSemanticTasks runs from an agent_end handler registered AFTER registerCapture
- * (so the journal capture wrote this turn is visible). It is cheap when not due: with no task flag
- * set it returns immediately; otherwise it reads the small state file, skips unless a task's
- * min-interval elapsed (no journal hashing), and only then hashes journals once and (if the digest
- * changed) calls the model. The synthesis goes through runCompletion (a DIRECT model call), which
- * does not run the agent loop and cannot re-fire agent_end (same rationale as capture).
+ * (so the journal capture wrote this turn is visible — capture's handler is awaited and runs first).
+ * It is cheap when not due: with no task flag set it returns immediately; otherwise it reads the small
+ * state file, skips unless a task's min-interval elapsed (no journal hashing), and only then hashes
+ * journals once and (if the digest changed) calls the model. The synthesis goes through runCompletion
+ * (a DIRECT model call), which does not run the agent loop and cannot re-fire agent_end (same
+ * rationale as capture).
+ *
+ * Non-blocking (UX): the agent_end handler fires synthesis FIRE-AND-FORGET — it is NOT awaited, so it
+ * never stalls turn-settle / next-prompt readiness on the rare due turn. Synthesis is pure derived
+ * data (rebuildable from journals anytime), so abandoning an in-flight run on quit/session-switch
+ * costs nothing — it records no state and retries next due agent_end (write-then-mark, D8). Because it
+ * outlives the turn, the model call is bounded only by its own timeout (bindTurnSignal:false) rather
+ * than ctx.signal, which would abort it the instant the turn settles. This mirrors the upstream
+ * plugins, which run the equivalent maintenance task as a detached background process.
  *
  * Contract (D1): the model returns {action:"none"|"replace", reason?, content?}, validated at the
  * boundary by isMaintenanceResult before anything is written. Notes use upstream's section shape.
@@ -26,15 +35,16 @@ import { runCompletion } from "./completion";
 import { RECENT_JOURNAL_LIMIT } from "./constants";
 import { digestJournals, readRecentJournals } from "./journal";
 import { withFileLock } from "./lock";
+import { memsearchDir } from "./paths";
 import { intervalElapsed, isDue, type MaintenanceTaskId, readState, updateTaskState } from "./maintenance-state";
 
 export const PROJECT_REVIEW_FLAG = "memsearch-project-review";
 export const USER_PROFILE_FLAG = "memsearch-user-profile";
 export const REVIEW_INTERVAL_FLAG = "memsearch-review-interval-hours";
 
-// Synthesis is a bigger prompt than capture's one-exchange summary, but a due agent_end already
-// awaits capture's 60s summarize first, so cap synthesis at 90s to keep the worst-case stacked
-// foreground block ~150s rather than ~180s (Step-9 finding #3).
+// Synthesis is a bigger prompt than capture's one-exchange summary. It now runs fire-and-forget (not
+// awaited on agent_end), so this 90s cap is a runaway guard on the detached call — not a bound on
+// foreground turn-end latency (it no longer stacks on capture's summarize).
 const SYNTHESIS_TIMEOUT_MS = 90_000;
 const DEFAULT_INTERVAL_HOURS = 24;
 const HOUR_MS = 3_600_000;
@@ -108,9 +118,10 @@ const TASKS: Record<SemanticTaskId, SemanticTask> = {
 	user_profile: { id: "user_profile", file: "USER.md", instruction: USER_PROFILE_INSTRUCTION },
 };
 
-/** Absolute path to a task's note file (.memsearch/PROJECT.md | USER.md — sibling of memory/). */
+/** Absolute path to a task's note file (.memsearch/PROJECT.md | USER.md — sibling of memory/),
+ *  anchored at the canonical project root (paths.ts) so it shares the journals' .memsearch tree. */
 function notePath(cwd: string, task: SemanticTask): string {
-	return join(cwd, ".memsearch", task.file);
+	return join(memsearchDir(cwd), task.file);
 }
 
 /** Strip a leading/trailing ```json fence the model may add around the JSON. */
@@ -195,7 +206,11 @@ async function runMaintenanceTask(ctx: ExtensionContext, cwd: string, taskId: Se
 	} catch {
 		// no note yet
 	}
-	const raw = await runCompletion(ctx, buildMaintenancePrompt(task, recent, existing), SYNTHESIS_TIMEOUT_MS);
+	// bindTurnSignal:false — this runs detached (fire-and-forget from agent_end), so it must not bind
+	// the turn's signal or turn-settle would abort it instantly; the 90s timeout is its only bound.
+	const raw = await runCompletion(ctx, buildMaintenancePrompt(task, recent, existing), SYNTHESIS_TIMEOUT_MS, {
+		bindTurnSignal: false,
+	});
 	if (!raw) return; // no model / no key / failure (D8) — nothing recorded, retries next due
 	const result = parseMaintenanceResult(raw);
 	if (!result) return; // invalid contract (D8) — treated as failure, no state update
@@ -312,13 +327,15 @@ export function registerSemanticSurfaces(pi: ExtensionAPI): void {
 	pi.on("session_tree", async () => resetWarn());
 
 	pi.on("agent_end", async (_event, ctx) => {
-		try {
-			await runDueSemanticTasks(pi, ctx);
-		} catch (e) {
+		// Fire-and-forget: do NOT await — synthesis must not stall turn-settle / next-prompt readiness.
+		// runDueSemanticTasks is internally cheap when not due (returns before any await on the common
+		// path), so the floated promise resolves immediately in the overwhelming majority of turns. A
+		// failure is surfaced warn-once (a turn later than before) and retried next due agent_end.
+		void runDueSemanticTasks(pi, ctx).catch((e) => {
 			if (ctx.hasUI && !synthesisWarned) {
 				synthesisWarned = true;
 				ctx.ui.notify(`memsearch semantic synthesis failed: ${(e as Error).message}`, "warning");
 			}
-		}
+		});
 	});
 }

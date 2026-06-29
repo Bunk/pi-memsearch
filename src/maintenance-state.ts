@@ -10,6 +10,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { memsearchDir } from "./paths";
 import { withFileLock } from "./lock";
 
 export type MaintenanceTaskId = "project_review" | "user_profile" | "live_reindex";
@@ -26,9 +27,10 @@ export type MaintenanceState = Partial<Record<MaintenanceTaskId, TaskState>>;
 
 const TASK_IDS: readonly MaintenanceTaskId[] = ["project_review", "user_profile", "live_reindex"];
 
-/** Absolute path to the project-global state file (sibling of memory/, mirrors upstream). */
+/** Absolute path to the project-global state file (sibling of memory/, mirrors upstream), anchored at
+ *  the canonical project root (paths.ts) so it shares the journals' .memsearch tree. */
 export function maintenanceStatePath(cwd: string): string {
-	return join(cwd, ".memsearch", ".maintenance-state.json");
+	return join(memsearchDir(cwd), ".maintenance-state.json");
 }
 
 /** Boundary guard for a persisted TaskState (the file is hand-editable). */

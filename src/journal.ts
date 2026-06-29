@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { memsearchDir } from "./paths";
 
 /** Digest sentinel returned by digestJournals when no journals exist. Exported so the live re-index
  *  empty-guard shares one definition (single source of truth). */
@@ -28,9 +29,10 @@ export function formatTime(d: Date): string {
 	return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** Absolute path to the project-local memory directory. */
+/** Absolute path to the project-local memory directory, anchored at the canonical project root
+ *  (git root / realpath — see paths.ts) so journals never split across launch depth or symlinks. */
 export function journalMemoryDir(cwd: string): string {
-	return join(cwd, ".memsearch", "memory");
+	return join(memsearchDir(cwd), "memory");
 }
 
 /** Absolute path to the daily journal file for `date`. */
