@@ -48,6 +48,22 @@ isolate data. Fix: derive a per-project collection and pass it to index / search
 **This is the starkest gap** — the one feature with zero precedent for skipping. Small,
 self-contained, and should be done first.
 
+> **Correction (2026-06-29).** Shipped, but the first cut keyed the collection off the **raw
+> cwd**, which is not full parity with upstream's isolation. Two axes were missing, now fixed in
+> `src/paths.ts` (`projectRoot`):
+> - **git-root normalization.** Claude Code's `common.sh` keys off `git rev-parse --show-toplevel`,
+>   so any subdir of a repo shares one collection. Keying off raw cwd meant a subdir launch and a
+>   repo-root launch produced *different* collections (and wouldn't share memory with a Claude Code
+>   install of the same repo). We now walk up for a `.git` entry and key off the repo root.
+> - **symlink resolution.** `derive-collection.sh` uses `realpath -m`; we now `realpath` the root so
+>   symlink-equivalent launch paths map to one collection.
+>
+> The journal dir, semantic notes, and maintenance state are anchored on the **same** resolved root
+> (`memsearchDir`), so the collection and its source journals can never diverge — which also closes a
+> latent data-loss footgun: a subdir-keyed journal dir + repo-root-keyed collection would let a
+> `/memory-reset` from one subdir reindex only that subdir and silently drop the rest of the repo's
+> indexed memory.
+
 ### 2. Procedural memory ("Skills from Memory") — highest dev value
 
 Upstream's newest layer distills *recurring workflows* into installable Agent-Skills
@@ -72,8 +88,18 @@ own `agent_end`, so an externally-written or edited journal can go stale until t
 capture in *this* session. Relevant because pi spawns subagents and supports concurrent
 sessions.
 
-**Split precedent:** three plugins use a live watcher/daemon (Claude Code, Codex, OpenCode);
-OpenClaw re-indexes inline on each captured turn. Two valid designs to choose from.
+**Split precedent:** OpenClaw re-indexes inline on each captured turn; OpenCode runs a background
+`capture-daemon.py` that polls its SQLite store and indexes. Claude Code / Codex run a `watch`
+daemon **only against Server-mode Milvus (http/tcp)**.
+
+> **Correction (2026-06-29).** The original "three plugins use a live watcher/daemon" framing is
+> misleading for the **default Milvus-Lite** backend that we (and most users) run. In Lite mode
+> Claude Code / Codex `start_watch` **explicitly skips `watch`** ("file lock prevents concurrent
+> access") and instead indexes at session boundaries — `index` on session-start + `index` on the
+> Stop hook. So in the common case there is no live daemon at all. Our digest-gated reindex on
+> `before_agent_start` (turn start) is therefore comparable to — and arguably *more* responsive
+> than — their session-boundary indexing for catching externally-written / parallel-session
+> journals, without any long-lived process to orphan.
 
 ### 5. Config + diagnostics surface (`memory-config`, `stats`)
 
@@ -85,12 +111,24 @@ recall working" loops.
 
 ### 6. `compact` / `reset` surfacing
 
-- `compact` — LLM compression of old chunks; matters for long-term scaling.
-- `reset` — drop/rebuild after a provider/model switch.
-
-**Never standalone** in any plugin — always reached through the `memory-config` skill's guided
-flows. If we build the diagnostics/config surface (Priority 5), these come along as operations
-within it.
+- `reset` — drop/rebuild after a provider/model switch. **✅ Shipped** in `ef52dfb` as part of the
+  Priority 5 config surface (`/memory-reset`).
+- `compact` — **Closed / won't-do** (decided 2026-06-28). The original premise here ("LLM
+  compression of old chunks; matters for long-term scaling") was wrong on two counts, verified
+  against the v0.4.10 CLI and the upstream plugin source:
+  1. `memsearch compact` prunes/compresses **nothing**. It LLM-summarizes indexed chunks and
+     **appends** a new `memory/YYYY-MM-DD.md` summary — additive, not reductive. No age/threshold
+     flag exists; there is no prune-by-age mechanism short of `reset` or deleting source files. The
+     scaling rationale is unachievable with this command.
+  2. The "never standalone — always reached through the `memory-config` skill" claim is false. A
+     direct read of all four reference plugins found **zero** compact invocations: it is not a
+     `maintenance-runner.py` task, has no `compact.txt` prompt, and is absent from every
+     `memory-config` SKILL.md (not even a `prompts.compact` key).
+  Compact's real behavior (LLM synthesis → markdown artifact) overlaps the **semantic layer**
+  (PROJECT.md/USER.md) we already shipped, and its default output path collides with capture's daily
+  journal. Wiring it would put us *ahead of* every plugin on a feature none of them surface.
+  Full evidence: `.rpiv/artifacts/research/2026-06-28_18-27-08_compact-gap-6.md`. A future reversal
+  (a denser searchable rollup) would be a net-new product decision, not a parity gap.
 
 ### Minor / probably skip
 
@@ -121,7 +159,7 @@ Legend: ✅ supported · ⚠️ partial / implicit · ❌ absent
 | **1. Per-project collection isolation** | ❌ shared default | ✅ | ✅ | ✅ | ✅ |
 | **2. Procedural memory (skills-from-memory)** | ❌ | ✅ | ✅ | ✅ | ✅ |
 | **3. Semantic layer (PROJECT.md / USER.md)** | ❌ | ✅ opt-in | ✅ opt-in | ✅ opt-in | ✅ opt-in |
-| **4. Live re-index (`watch`)** | ❌ index on `agent_end` | ✅ | ✅ | ✅ daemon | ⚠️ index-on-capture |
+| **4. Live re-index** | ✅ digest-gated reindex on turn-start | ⚠️ Lite: index at session boundaries (`watch` only in Server mode) | ⚠️ same | ✅ capture daemon | ⚠️ index-on-capture |
 | **5. Config + diagnostics surface (`memory-config`, `stats`)** | ❌ (one flag) | ✅ | ✅ | ✅ | ✅ |
 | **6. `compact` / `reset` surfacing** | ❌ | ✅ via skill | ✅ via skill | ✅ via skill | ✅ via skill |
 
@@ -133,9 +171,12 @@ Legend: ✅ supported · ⚠️ partial / implicit · ❌ absent
   all three skills — `memory-recall`, `memory-config`, `memory-to-skill` — ship in *all four*
   plugin dirs.)
 - **Priority 1** is the starkest gap and the only feature with no precedent for skipping.
-- **Priority 4** has a split precedent (live watcher/daemon vs. inline re-index), giving us
-  two valid designs.
-- **Priority 6** is never a standalone surface — it lives inside the config skill (Priority 5).
+- **Priority 4** has a split precedent, but note (see §4 correction) that in the default
+  Milvus-Lite backend Claude Code / Codex do **not** run a live `watch` daemon — they index at
+  session boundaries. Our digest-gated turn-start reindex is comparable or better in that mode.
+- **Priority 6**: `reset` shipped inside the config skill (Priority 5). `compact` is **closed /
+  won't-do** — its real CLI behavior (summarize-and-append, not compression) doesn't match the need
+  and no reference plugin wires it (see §6).
 - **Our security hardening is the inverted gap** — the one dimension where every upstream
   plugin is behind us. Preserve it as the design constraint when porting these features:
   anything we add (collection derivation, watch, skill install paths) must stay trust-gated
@@ -153,8 +194,12 @@ Highest-alignment, lowest-risk first:
 2. **Config + diagnostics surface** (`/memory-status`, `stats`) — connective tissue
 3. **Procedural memory → pi skills** (flagship dev value)
 4. **Semantic layer** (PROJECT.md / USER.md)
-5. **Live re-index** (`watch`) — matters for subagents / parallel sessions
-6. **`compact` / `reset`** — folded into the config surface
+5. **Live re-index** (`watch`) — matters for subagents / parallel sessions ✅ shipped (`135cea2`)
+6. **`reset`** — folded into the config surface ✅ shipped (`ef52dfb`); **`compact`** closed /
+   won't-do (2026-06-28, see §6)
+
+**Status (2026-06-28):** all six roadmap items resolved. Gaps 1–5 shipped; gap 6's `reset` shipped
+and `compact` closed as not-applicable. The roadmap is complete.
 
 ## Sources
 

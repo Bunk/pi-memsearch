@@ -56,7 +56,10 @@ as guidance the user applies).
 - `reset` is recoverable: it clears the index, not the journals under `.memsearch/memory/`, so a
   reindex rebuilds everything. It is scoped to THIS project's collection — it never touches other
   projects' memories.
-- `compact` (LLM compression of old chunks) is not yet wired into this skill — it lands in a future
-  version.
+- `compact` is intentionally **not** wired into this skill. Despite the name, `memsearch compact`
+  does not prune or compress the index — it LLM-summarizes indexed chunks and appends a new
+  `memory/YYYY-MM-DD.md` file (additive, not reductive), and no reference plugin surfaces it. Its
+  synthesis behavior overlaps the semantic layer (PROJECT.md/USER.md). See
+  `.rpiv/artifacts/research/2026-06-28_18-27-08_compact-gap-6.md`.
 - Everything here is trust-gated: in an untrusted project both `/memory-status` and `/memory-reset`
   decline.
